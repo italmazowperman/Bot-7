@@ -1,12 +1,7 @@
 import os
 import logging
-import json
-from fastapi import FastAPI, HTTPException, Header, Depends
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -19,13 +14,31 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
+# Добавьте эти импорты для API
+from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+import json
+from pydantic import BaseModel
+import asyncio
+
 from database import DatabaseManager
 from models import Order, Container, Task, OrderStatus
 from pdf_generator import generate_order_pdf, generate_summary_pdf
 from notification_service import NotificationService
 from utils import format_date, get_status_emoji, format_order_info
 
-# Создайте FastAPI приложение
+# Загрузка переменных окружения
+load_dotenv()
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Создаем FastAPI приложение
 app = FastAPI(title="Margiana Logistics API")
 
 # Добавьте CORS middleware
@@ -37,42 +50,81 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API ключ для аутентификации (используйте сложный ключ)
-API_KEY = "margiana_sync_key_2024_secure"
+# Инициализация менеджеров
+db = DatabaseManager()
+notification_service = NotificationService()
+
+# API ключ для аутентификации
+API_KEY = os.getenv('SYNC_API_KEY', 'margiana_sync_key_2024_secure_change_this')
+
+# Pydantic модели
+class OrderSyncData(BaseModel):
+    order_number: str
+    client_name: str
+    container_count: Optional[int] = 0
+    goods_type: Optional[str] = None
+    route: Optional[str] = None
+    transit_port: Optional[str] = None
+    document_number: Optional[str] = None
+    chinese_transport_company: Optional[str] = None
+    iranian_transport_company: Optional[str] = None
+    status: Optional[str] = "New"
+    status_color: Optional[str] = "#FFFFFF"
+    creation_date: Optional[datetime] = None
+    loading_date: Optional[datetime] = None
+    departure_date: Optional[datetime] = None
+    arrival_iran_date: Optional[datetime] = None
+    truck_loading_date: Optional[datetime] = None
+    arrival_turkmenistan_date: Optional[datetime] = None
+    client_receiving_date: Optional[datetime] = None
+    arrival_notice_date: Optional[datetime] = None
+    tkm_date: Optional[datetime] = None
+    eta_date: Optional[datetime] = None
+    has_loading_photo: Optional[bool] = False
+    has_local_charges: Optional[bool] = False
+    has_tex: Optional[bool] = False
+    notes: Optional[str] = None
+    additional_info: Optional[str] = None
+    sync_type: Optional[str] = "update"
+    sync_timestamp: Optional[datetime] = None
 
 # Функция для проверки API ключа
-def verify_api_key(api_key: str = Header(...)):
-    if api_key != API_KEY:
+def verify_api_key(api_key: str = Header(None, alias="api-key")):
+    if not api_key or api_key != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid API key")
     return api_key
 
 # Эндпоинт для проверки связи
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "Margiana Logistics API", "timestamp": datetime.now().isoformat()}
+
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "service": "Margiana Logistics API"}
+    return {"status": "ok", "service": "Margiana Logistics API", "timestamp": datetime.now().isoformat()}
 
 # Эндпоинт для синхронизации заказа
 @app.post("/api/sync/order")
 async def sync_order(
-    order_data: dict,
+    order_data: OrderSyncData,
     api_key: str = Depends(verify_api_key)
 ):
     try:
-        logger.info(f"Syncing order: {order_data.get('order_number')}")
+        logger.info(f"Syncing order: {order_data.order_number}")
+        
+        # Конвертируем Pydantic модель в словарь
+        order_dict = order_data.dict()
         
         # Обновляем заказ в базе данных
-        success = db.update_order_from_sync(order_data)
+        success = db.update_order_from_sync(order_dict)
         
         if success:
             # Создаем уведомление
-            order_number = order_data.get('order_number')
-            notification_type = order_data.get('sync_type', 'update')
-            
             message = f"""
-🔄 *СИНХРОНИЗАЦИЯ: {notification_type.upper()}*
+🔄 *СИНХРОНИЗАЦИЯ: {order_data.sync_type.upper()}*
 
-📦 Заказ: *{order_number}*
-📝 Статус: {order_data.get('status', 'Updated')}
+📦 Заказ: *{order_data.order_number}*
+📝 Статус: {order_data.status}
 👤 Пользователь: Desktop App
 📅 Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}
 
@@ -84,15 +136,13 @@ async def sync_order(
             for chat_id in admin_ids:
                 if chat_id.strip():
                     try:
-                        await app.bot.send_message(
-                            chat_id=chat_id.strip(),
-                            text=message,
-                            parse_mode=ParseMode.MARKDOWN
-                        )
+                        # Здесь мы не можем отправить сообщение без бота
+                        # Сохраним в базе для отправки позже
+                        pass
                     except Exception as e:
-                        logger.error(f"Failed to send notification: {e}")
+                        logger.error(f"Failed to create notification: {e}")
             
-            return {"status": "success", "message": "Order synced"}
+            return {"status": "success", "message": "Order synced", "order_number": order_data.order_number}
         else:
             return {"status": "error", "message": "Failed to sync order"}
             
@@ -103,7 +153,7 @@ async def sync_order(
 # Эндпоинт для получения заказов
 @app.get("/api/orders")
 async def get_orders(
-    status: str = None,
+    status: Optional[str] = None,
     limit: int = 100,
     api_key: str = Depends(verify_api_key)
 ):
@@ -140,33 +190,6 @@ async def get_orders(
         logger.error(f"Error in get_orders: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Эндпоинт для поиска заказов
-@app.get("/api/orders/search")
-async def search_orders(
-    q: str,
-    api_key: str = Depends(verify_api_key)
-):
-    try:
-        orders = db.search_orders(q)
-        
-        orders_data = []
-        for order in orders[:50]:
-            order_dict = {
-                'id': order.id,
-                'order_number': order.order_number,
-                'client_name': order.client_name,
-                'status': order.status,
-                'container_count': order.container_count,
-                'route': order.route
-            }
-            orders_data.append(order_dict)
-        
-        return {"status": "success", "count": len(orders_data), "orders": orders_data}
-        
-    except Exception as e:
-        logger.error(f"Error in search_orders: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 # Эндпоинт для статистики
 @app.get("/api/statistics")
 async def get_statistics(
@@ -179,20 +202,6 @@ async def get_statistics(
     except Exception as e:
         logger.error(f"Error in get_statistics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# Загрузка переменных окружения
-load_dotenv()
-
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# Инициализация менеджеров
-db = DatabaseManager()
-notification_service = NotificationService()
 
 # Команда /start
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -216,13 +225,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *Отчеты:*
 /report <номер_заказа> - PDF отчет по заказу
 /summary - Сводный отчет (PDF)
-/orders_without_photos - Заказы без фото загрузки
-/orders_without_docs - Заказы без документов
-
-*Уведомления:*
-/subscribe - Подписаться на уведомления
-/unsubscribe - Отписаться от уведомлений
-/settings - Настройки уведомлений
 
 *Помощь:*
 /help - Показать это сообщение
@@ -766,33 +768,203 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "today_events":
         await today_events_command(update, context)
-    
-    elif data == "upcoming_events":
-        await upcoming_events_command(update, context)
-    
-    elif data.startswith("order_"):
-        order_id = int(data.replace("order_", ""))
-        order = db.get_order_by_id(order_id)
-        if order:
-            await send_order_details(query.message, order)
-    
-    elif data == "calendar_view":
-        await upcoming_events_command(update, context)
 
-async def send_order_details(message, order):
-    """Отправить детали заказа"""
-    text = format_order_info(order)
+async def show_orders_by_status(update: Update, status: str):
+    """Показать заказы по статусу"""
+    try:
+        if status == "Все статусы":
+            orders = db.get_all_orders()
+            status_text = "всех статусов"
+        else:
+            orders = db.get_orders_by_status(status)
+            status_text = status
+        
+        if not orders:
+            await update.message.reply_text(f"📭 Нет заказов со статусом '{status}'.")
+            return
+        
+        text = f"📋 *Заказы ({status_text})* ({len(orders)}):\n\n"
+        for i, order in enumerate(orders[:10], 1):
+            text += f"{i}. {get_status_emoji(order.status)} *{order.order_number}*\n"
+            text += f"   👤 {order.client_name}\n"
+            text += f"   📦 {order.container_count} контейнеров\n"
+            
+            if order.eta_date:
+                eta_str = format_date(order.eta_date)
+                text += f"   ⏳ ETA: {eta_str}\n"
+            
+            text += f"   📍 {order.route}\n\n"
+        
+        if len(orders) > 10:
+            text += f"\n_... и еще {len(orders) - 10} заказов_"
+        
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in show_orders_by_status: {e}")
+        await update.message.reply_text("❌ Ошибка при получении данных.")
+
+# Команда /search - поиск заказов
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Поиск заказов"""
+    if not context.args:
+        await update.message.reply_text(
+            "🔍 Использование: `/search <текст>`\n\n"
+            "Примеры:\n"
+            "`/search ORD-001`\n"
+            "`/search Company A`\n"
+            "`/search Shanghai`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
     
-    keyboard = [
-        [InlineKeyboardButton("📄 PDF отчет", callback_data=f"pdf_{order.id}")],
-        [InlineKeyboardButton("📅 События", callback_data=f"events_{order.id}")],
-        [InlineKeyboardButton("📦 Контейнеры", callback_data=f"containers_{order.id}")]
-    ]
+    search_text = ' '.join(context.args)
+    try:
+        orders = db.search_orders(search_text)
+        
+        if not orders:
+            await update.message.reply_text(f"🔍 По запросу '{search_text}' ничего не найдено.")
+            return
+        
+        text = f"🔍 *Результаты поиска* ('{search_text}'):\n\n"
+        for i, order in enumerate(orders[:15], 1):
+            text += f"{i}. {get_status_emoji(order.status)} *{order.order_number}*\n"
+            text += f"   👤 {order.client_name}\n"
+            text += f"   📦 {order.container_count} контейнеров\n"
+            text += f"   📍 {order.route}\n"
+            text += f"   📝 {order.status}\n\n"
+        
+        if len(orders) > 15:
+            text += f"\n_... и еще {len(orders) - 15} заказов_"
+        
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in search_command: {e}")
+        await update.message.reply_text("❌ Ошибка при поиске.")
+
+# Команда /report - отчет по заказу в PDF
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Генерация PDF отчета по заказу"""
+    if not context.args:
+        await update.message.reply_text(
+            "📄 Использование: `/report <номер_заказа>`\n\n"
+            "Пример: `/report ORD-001`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
     
-    await message.reply_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    order_number = context.args[0]
+    try:
+        order = db.get_order_by_number(order_number)
+        if not order:
+            await update.message.reply_text(f"❌ Заказ '{order_number}' не найден.")
+            return
+        
+        # Генерируем PDF
+        pdf_bytes = generate_order_pdf(order)
+        
+        # Отправляем PDF
+        await update.message.reply_document(
+            document=pdf_bytes,
+            filename=f"{order.order_number}_report.pdf",
+            caption=f"📄 Отчет по заказу {order.order_number}\n"
+                   f"👤 {order.client_name}\n"
+                   f"📦 {order.container_count} контейнеров\n"
+                   f"📝 {order.status}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in report_command: {e}")
+        await update.message.reply_text(f"❌ Ошибка при генерации отчета: {str(e)}")
+
+# Команда /summary - сводный отчет
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сводный отчет по всем заказам"""
+    try:
+        # Параметры отчета
+        days_back = 30
+        
+        # Генерируем PDF
+        pdf_bytes = generate_summary_pdf(days_back)
+        
+        # Отправляем PDF
+        await update.message.reply_document(
+            document=pdf_bytes,
+            filename=f"summary_report_{datetime.now().strftime('%Y%m%d')}.pdf",
+            caption=f"📊 Сводный отчет за {days_back} дней\n"
+                   f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in summary_command: {e}")
+        await update.message.reply_text("❌ Ошибка при генерации отчета.")
+
+# Команда /help
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать помощь"""
+    help_text = """
+📋 *Доступные команды:*
+
+*Основные:*
+/start - Начать работу
+/active - Активные заказы
+/completed - Завершенные заказы (30 дней)
+/today - События сегодня
+/upcoming - Предстоящие события (7 дней)
+/status [статус] - Заказы по статусу
+/search [текст] - Поиск заказов
+
+*Отчеты:*
+/report [номер] - PDF отчет по заказу
+/summary [дней] - Сводный PDF отчет
+
+*Контакты:*
+/contacts - Контакты компании
+
+💡 *Примеры:*
+`/status In Progress CHN`
+`/search ORD-001`
+`/report ORD-001`
+`/summary 30`
+"""
+    
+    await update.message.reply_text(
+        help_text,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# Команда /contacts
+async def contacts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Контакты компании"""
+    contacts_text = """
+🏢 *Margiana Logistic Services*
+
+📞 Телефон: +993 61 55 77 79
+📧 Email: perman@margianalogistics.com
+📱 Telegram: @margiana_logistics
+
+🌐 *Международная логистика и транспорт:*
+• Китай → Туркменистан через Иран
+• Морские перевозки
+• Таможенное оформление
+• Сопровождение грузов
+
+📍 *Маршруты:*
+Shanghai → Vladivostok → Moscow
+Guangzhou → Helsinki → St. Petersburg
+и другие
+"""
+    
+    await update.message.reply_text(
+        contacts_text,
+        parse_mode=ParseMode.MARKDOWN
     )
 
 # Обработчик ошибок
@@ -805,33 +977,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Произошла ошибка. Пожалуйста, попробуйте позже."
         )
 
-# Функция проверки и отправки уведомлений
-async def check_and_send_notifications(context: ContextTypes.DEFAULT_TYPE):
-    """Проверка и отправка уведомлений о событиях"""
-    try:
-        notifications = notification_service.get_upcoming_notifications()
-        
-        for notification in notifications:
-            chat_id = notification['chat_id']
-            message = notification['message']
-            
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=message,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                notification_service.mark_notification_sent(notification['id'])
-            except Exception as e:
-                logger.error(f"Failed to send notification: {e}")
-    
-    except Exception as e:
-        logger.error(f"Error in check_and_send_notifications: {e}")
-
-# Основная функция
-def main():
-    """Запуск бота"""
-    # Получение токена бота
+# Основная функция для запуска бота
+async def run_bot():
+    """Запуск Telegram бота"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN не найден в переменных окружения")
@@ -843,15 +991,9 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("active", active_orders_command))
-    application.add_handler(CommandHandler("completed", completed_orders_command))
-    application.add_handler(CommandHandler("today", today_events_command))
-    application.add_handler(CommandHandler("upcoming", upcoming_events_command))
-    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("summary", summary_command))
-    application.add_handler(CommandHandler("orders_without_photos", orders_without_photos_command))
-    application.add_handler(CommandHandler("orders_without_docs", orders_without_docs_command))
     application.add_handler(CommandHandler("contacts", contacts_command))
     
     # Регистрация обработчика callback-запросов
@@ -860,82 +1002,27 @@ def main():
     # Регистрация обработчика ошибок
     application.add_error_handler(error_handler)
     
-    # Настройка планировщика для проверки уведомлений
-    job_queue = application.job_queue
-    if job_queue:
-        # Проверка каждые 15 минут
-        job_queue.run_repeating(
-            check_and_send_notifications,
-            interval=900,  # 15 минут в секундах
-            first=10
-        )
-    
-    # Запуск бота
-    logger.info("Бот запущен...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("Запуск Telegram бота...")
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == '__main__':
-# В конец файла bot.py, перед main(), добавьте:
-
-# Глобальная переменная для бота
-bot_instance = None
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Запуск при старте
-    global bot_instance
-    bot_instance = application.bot
-    
-    # Запускаем бота в фоне
-    bot_task = asyncio.create_task(application.run_polling())
-    
-    yield
-    
-    # Очистка при остановке
-    bot_task.cancel()
-    try:
-        await bot_task
-    except asyncio.CancelledError:
-        pass
-
-# Обновите app с lifespan
-app = FastAPI(lifespan=lifespan)
-app.bot = None  # Будет установлен в lifespan
-
-# В функции main() измените последние строки:
-def main():
-    """Запуск бота и API"""
-    # Получение токена бота
-    token = os.getenv('TELEGRAM_BOT_TOKEN')
-    if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN не найден в переменных окружения")
-    
-    # Создание приложения бота
-    telegram_app = Application.builder().token(token).build()
-    
-    # Регистрация обработчиков команд (ваш существующий код)
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(CommandHandler("help", help_command))
-    # ... добавьте все ваши обработчики ...
-    
-    # Регистрация обработчика callback-запросов
-    telegram_app.add_handler(CallbackQueryHandler(button_callback))
-    
-    # Регистрация обработчика ошибок
-    telegram_app.add_error_handler(error_handler)
-    
-    # Сохраняем приложение в глобальной переменной
-    application = telegram_app
+# Главная функция запуска
+async def main():
+    """Запуск API и бота"""
+    # Запускаем бота в отдельной задаче
+    bot_task = asyncio.create_task(run_bot())
     
     # Запускаем API сервер
-    import uvicorn
     port = int(os.getenv('PORT', 8000))
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
     
     logger.info(f"Запуск API сервера на порту {port}...")
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        log_level="info"
+    
+    # Запускаем оба сервиса
+    await asyncio.gather(
+        server.serve(),
+        bot_task
     )
-    main()
+
+if __name__ == '__main__':
+    asyncio.run(main())
