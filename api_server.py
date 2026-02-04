@@ -36,10 +36,8 @@ app.add_middleware(
 def get_db_connection():
     """Создать соединение с Supabase"""
     try:
-        # Используем ваш DATABASE_URL из переменных окружения
         database_url = os.getenv('DATABASE_URL')
         if not database_url:
-            # Формируем URL из данных которые вы предоставили
             database_url = "postgresql://postgres.neypmeacztdapjfrnzgu:margiana0011@aws-1-eu-north-1.pooler.supabase.com:6543/postgres"
         
         conn = psycopg2.connect(
@@ -107,11 +105,9 @@ async def test_db_connection():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Простой запрос для проверки
         cursor.execute("SELECT version()")
         db_version = cursor.fetchone()
         
-        # Проверяем существование таблицы orders
         cursor.execute("""
             SELECT EXISTS (
                 SELECT FROM information_schema.tables 
@@ -120,6 +116,18 @@ async def test_db_connection():
         """)
         table_exists = cursor.fetchone()['exists']
         
+        # Получаем список колонок таблицы orders
+        if table_exists:
+            cursor.execute("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = 'orders' 
+                ORDER BY ordinal_position
+            """)
+            columns = cursor.fetchall()
+        else:
+            columns = []
+        
         cursor.close()
         conn.close()
         
@@ -127,6 +135,7 @@ async def test_db_connection():
             "status": "success",
             "database_version": db_version['version'],
             "orders_table_exists": table_exists,
+            "columns": columns,
             "message": "Database connection successful"
         }
         
@@ -136,6 +145,58 @@ async def test_db_connection():
             "status": "error",
             "message": str(e)
         }
+
+def create_orders_table():
+    """Создать таблицу orders с правильной структурой"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Создаем таблицу с правильной структурой (как в вашем SQL скрипте)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id SERIAL PRIMARY KEY,
+                order_number VARCHAR(50) UNIQUE NOT NULL,
+                client_name VARCHAR(200) NOT NULL,
+                container_count INTEGER DEFAULT 0,
+                goods_type VARCHAR(100),
+                route VARCHAR(200),
+                transit_port VARCHAR(100),
+                document_number VARCHAR(100),
+                chinese_transport_company VARCHAR(200),
+                iranian_transport_company VARCHAR(200),
+                status VARCHAR(50) DEFAULT 'New',
+                status_color VARCHAR(20) DEFAULT '#FFFFFF',
+                creation_date TIMESTAMP DEFAULT NOW(),
+                loading_date TIMESTAMP,
+                departure_date TIMESTAMP,
+                arrival_iran_date TIMESTAMP,
+                truck_loading_date TIMESTAMP,
+                arrival_turkmenistan_date TIMESTAMP,
+                client_receiving_date TIMESTAMP,
+                arrival_notice_date TIMESTAMP,
+                tkm_date TIMESTAMP,
+                eta_date TIMESTAMP,
+                has_loading_photo BOOLEAN DEFAULT FALSE,
+                has_local_charges BOOLEAN DEFAULT FALSE,
+                has_tex BOOLEAN DEFAULT FALSE,
+                notes TEXT,
+                additional_info TEXT,
+                sync_timestamp TIMESTAMP DEFAULT NOW(),
+                last_modified TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        logger.info("Created orders table with correct structure")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error creating orders table: {e}")
+        return False
 
 # Эндпоинт для синхронизации заказа
 @app.post("/api/sync/order")
@@ -235,10 +296,10 @@ async def sync_order(
                 loading_date, departure_date, arrival_iran_date, truck_loading_date,
                 arrival_turkmenistan_date, client_receiving_date, arrival_notice_date,
                 tkm_date, eta_date, has_loading_photo, has_local_charges, has_tex,
-                notes, additional_info, sync_timestamp, created_at, updated_at
+                notes, additional_info, sync_timestamp, last_modified
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), NOW()
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
             ) RETURNING id
             """
             
@@ -290,55 +351,20 @@ async def sync_order(
     except Exception as e:
         logger.error(f"Error in sync_order: {e}")
         
-        # Пробуем создать таблицу, если её нет
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            
-            # Создаем таблицу orders если её нет
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS orders (
-                    id SERIAL PRIMARY KEY,
-                    order_number VARCHAR(50) UNIQUE NOT NULL,
-                    client_name VARCHAR(200) NOT NULL,
-                    container_count INTEGER DEFAULT 0,
-                    goods_type VARCHAR(100),
-                    route VARCHAR(200),
-                    transit_port VARCHAR(100),
-                    document_number VARCHAR(100),
-                    chinese_transport_company VARCHAR(200),
-                    iranian_transport_company VARCHAR(200),
-                    status VARCHAR(50) DEFAULT 'New',
-                    status_color VARCHAR(20) DEFAULT '#FFFFFF',
-                    creation_date TIMESTAMP,
-                    loading_date TIMESTAMP,
-                    departure_date TIMESTAMP,
-                    arrival_iran_date TIMESTAMP,
-                    truck_loading_date TIMESTAMP,
-                    arrival_turkmenistan_date TIMESTAMP,
-                    client_receiving_date TIMESTAMP,
-                    arrival_notice_date TIMESTAMP,
-                    tkm_date TIMESTAMP,
-                    eta_date TIMESTAMP,
-                    has_loading_photo BOOLEAN DEFAULT FALSE,
-                    has_local_charges BOOLEAN DEFAULT FALSE,
-                    has_tex BOOLEAN DEFAULT FALSE,
-                    notes TEXT,
-                    additional_info TEXT,
-                    sync_timestamp TIMESTAMP DEFAULT NOW(),
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    updated_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            conn.commit()
-            cursor.close()
-            conn.close()
-            
-            logger.info("Created orders table")
-            
-        except Exception as create_error:
-            logger.error(f"Error creating table: {create_error}")
+        # Если ошибка связана со структурой таблицы, создаем её заново
+        if "column" in str(e) and "does not exist" in str(e):
+            logger.info("Table structure mismatch. Recreating table...")
+            if create_orders_table():
+                # Пробуем снова после создания таблицы
+                try:
+                    # Простой рекурсивный вызов или можно вернуть ошибку
+                    logger.info("Table recreated. Please try the sync again.")
+                    return {
+                        "status": "retry",
+                        "message": "Table was recreated. Please try again."
+                    }
+                except Exception as retry_error:
+                    logger.error(f"Retry failed: {retry_error}")
         
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -354,7 +380,7 @@ async def get_orders(
         
         cursor.execute("""
             SELECT * FROM orders 
-            ORDER BY created_at DESC 
+            ORDER BY creation_date DESC 
             LIMIT %s
         """, (limit,))
         
@@ -403,6 +429,22 @@ async def get_order_by_number(
         
     except Exception as e:
         logger.error(f"Error in get_order_by_number: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/repair-table")
+async def repair_table(api_key: str = Depends(verify_api_key)):
+    """Пересоздать таблицу orders"""
+    try:
+        if create_orders_table():
+            return {
+                "status": "success",
+                "message": "Table 'orders' created successfully"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to create table")
+            
+    except Exception as e:
+        logger.error(f"Error repairing table: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
