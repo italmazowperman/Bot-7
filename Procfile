@@ -1,2 +1,2 @@
 web: python api_server.py
-bot: python telegram_bot.py
+bot: python telegram_bot_fixed.py
