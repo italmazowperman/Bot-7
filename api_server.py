@@ -7,6 +7,8 @@ from datetime import datetime
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -29,6 +31,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Подключение к Supabase
+def get_db_connection():
+    """Создать соединение с Supabase"""
+    try:
+        # Используем ваш DATABASE_URL из переменных окружения
+        database_url = os.getenv('DATABASE_URL')
+        if not database_url:
+            # Формируем URL из данных которые вы предоставили
+            database_url = "postgresql://postgres.neypmeacztdapjfrnzgu:margiana0011@aws-1-eu-north-1.pooler.supabase.com:6543/postgres"
+        
+        conn = psycopg2.connect(
+            database_url,
+            cursor_factory=RealDictCursor
+        )
+        return conn
+    except Exception as e:
+        logger.error(f"Error connecting to database: {e}")
+        raise
 
 # API ключ для аутентификации
 API_KEY = os.getenv('SYNC_API_KEY', 'margiana_sync_key_2024_secure_change_this')
@@ -79,19 +100,312 @@ async def root():
 async def health_check():
     return {"status": "ok", "service": "Margiana Logistics API", "timestamp": datetime.now().isoformat()}
 
+@app.get("/api/test-db")
+async def test_db_connection():
+    """Тест подключения к базе данных"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Простой запрос для проверки
+        cursor.execute("SELECT version()")
+        db_version = cursor.fetchone()
+        
+        # Проверяем существование таблицы orders
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'orders'
+            )
+        """)
+        table_exists = cursor.fetchone()['exists']
+        
+        cursor.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "database_version": db_version['version'],
+            "orders_table_exists": table_exists,
+            "message": "Database connection successful"
+        }
+        
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
 # Эндпоинт для синхронизации заказа
 @app.post("/api/sync/order")
 async def sync_order(
     order_data: OrderSyncData,
     api_key: str = Depends(verify_api_key)
 ):
+    """Синхронизация заказа с Supabase"""
     try:
         logger.info(f"Syncing order: {order_data.order_number}")
-        return {"status": "success", "message": "Order synced", "order_number": order_data.order_number}
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Проверяем существование заказа
+        cursor.execute(
+            "SELECT id FROM orders WHERE order_number = %s",
+            (order_data.order_number,)
+        )
+        existing_order = cursor.fetchone()
+        
+        if existing_order:
+            # Обновляем существующий заказ
+            logger.info(f"Updating existing order: {order_data.order_number}")
+            
+            update_query = """
+            UPDATE orders SET
+                client_name = %s,
+                container_count = %s,
+                goods_type = %s,
+                route = %s,
+                transit_port = %s,
+                document_number = %s,
+                chinese_transport_company = %s,
+                iranian_transport_company = %s,
+                status = %s,
+                status_color = %s,
+                creation_date = %s,
+                loading_date = %s,
+                departure_date = %s,
+                arrival_iran_date = %s,
+                truck_loading_date = %s,
+                arrival_turkmenistan_date = %s,
+                client_receiving_date = %s,
+                arrival_notice_date = %s,
+                tkm_date = %s,
+                eta_date = %s,
+                has_loading_photo = %s,
+                has_local_charges = %s,
+                has_tex = %s,
+                notes = %s,
+                additional_info = %s,
+                sync_timestamp = NOW(),
+                last_modified = NOW()
+            WHERE order_number = %s
+            RETURNING id
+            """
+            
+            cursor.execute(update_query, (
+                order_data.client_name,
+                order_data.container_count,
+                order_data.goods_type,
+                order_data.route,
+                order_data.transit_port,
+                order_data.document_number,
+                order_data.chinese_transport_company,
+                order_data.iranian_transport_company,
+                order_data.status,
+                order_data.status_color,
+                order_data.creation_date,
+                order_data.loading_date,
+                order_data.departure_date,
+                order_data.arrival_iran_date,
+                order_data.truck_loading_date,
+                order_data.arrival_turkmenistan_date,
+                order_data.client_receiving_date,
+                order_data.arrival_notice_date,
+                order_data.tkm_date,
+                order_data.eta_date,
+                order_data.has_loading_photo,
+                order_data.has_local_charges,
+                order_data.has_tex,
+                order_data.notes,
+                order_data.additional_info,
+                order_data.order_number
+            ))
+            
+        else:
+            # Создаем новый заказ
+            logger.info(f"Creating new order: {order_data.order_number}")
+            
+            insert_query = """
+            INSERT INTO orders (
+                order_number, client_name, container_count, goods_type, route,
+                transit_port, document_number, chinese_transport_company,
+                iranian_transport_company, status, status_color, creation_date,
+                loading_date, departure_date, arrival_iran_date, truck_loading_date,
+                arrival_turkmenistan_date, client_receiving_date, arrival_notice_date,
+                tkm_date, eta_date, has_loading_photo, has_local_charges, has_tex,
+                notes, additional_info, sync_timestamp, created_at, updated_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), NOW()
+            ) RETURNING id
+            """
+            
+            cursor.execute(insert_query, (
+                order_data.order_number,
+                order_data.client_name,
+                order_data.container_count,
+                order_data.goods_type,
+                order_data.route,
+                order_data.transit_port,
+                order_data.document_number,
+                order_data.chinese_transport_company,
+                order_data.iranian_transport_company,
+                order_data.status,
+                order_data.status_color,
+                order_data.creation_date,
+                order_data.loading_date,
+                order_data.departure_date,
+                order_data.arrival_iran_date,
+                order_data.truck_loading_date,
+                order_data.arrival_turkmenistan_date,
+                order_data.client_receiving_date,
+                order_data.arrival_notice_date,
+                order_data.tkm_date,
+                order_data.eta_date,
+                order_data.has_loading_photo,
+                order_data.has_local_charges,
+                order_data.has_tex,
+                order_data.notes,
+                order_data.additional_info
+            ))
+        
+        order_id = cursor.fetchone()['id']
+        conn.commit()
+        
+        cursor.close()
+        conn.close()
+        
+        logger.info(f"Order {order_data.order_number} synced successfully with ID: {order_id}")
+        
+        return {
+            "status": "success",
+            "message": "Order synced successfully",
+            "order_number": order_data.order_number,
+            "order_id": order_id,
+            "action": "updated" if existing_order else "created"
+        }
+        
     except Exception as e:
         logger.error(f"Error in sync_order: {e}")
+        
+        # Пробуем создать таблицу, если её нет
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Создаем таблицу orders если её нет
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    id SERIAL PRIMARY KEY,
+                    order_number VARCHAR(50) UNIQUE NOT NULL,
+                    client_name VARCHAR(200) NOT NULL,
+                    container_count INTEGER DEFAULT 0,
+                    goods_type VARCHAR(100),
+                    route VARCHAR(200),
+                    transit_port VARCHAR(100),
+                    document_number VARCHAR(100),
+                    chinese_transport_company VARCHAR(200),
+                    iranian_transport_company VARCHAR(200),
+                    status VARCHAR(50) DEFAULT 'New',
+                    status_color VARCHAR(20) DEFAULT '#FFFFFF',
+                    creation_date TIMESTAMP,
+                    loading_date TIMESTAMP,
+                    departure_date TIMESTAMP,
+                    arrival_iran_date TIMESTAMP,
+                    truck_loading_date TIMESTAMP,
+                    arrival_turkmenistan_date TIMESTAMP,
+                    client_receiving_date TIMESTAMP,
+                    arrival_notice_date TIMESTAMP,
+                    tkm_date TIMESTAMP,
+                    eta_date TIMESTAMP,
+                    has_loading_photo BOOLEAN DEFAULT FALSE,
+                    has_local_charges BOOLEAN DEFAULT FALSE,
+                    has_tex BOOLEAN DEFAULT FALSE,
+                    notes TEXT,
+                    additional_info TEXT,
+                    sync_timestamp TIMESTAMP DEFAULT NOW(),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            logger.info("Created orders table")
+            
+        except Exception as create_error:
+            logger.error(f"Error creating table: {create_error}")
+        
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/orders")
+async def get_orders(
+    limit: int = 100,
+    api_key: str = Depends(verify_api_key)
+):
+    """Получить список заказов"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT * FROM orders 
+            ORDER BY created_at DESC 
+            LIMIT %s
+        """, (limit,))
+        
+        orders = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "count": len(orders),
+            "orders": orders
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in get_orders: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/orders/{order_number}")
+async def get_order_by_number(
+    order_number: str,
+    api_key: str = Depends(verify_api_key)
+):
+    """Получить заказ по номеру"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT * FROM orders WHERE order_number = %s",
+            (order_number,)
+        )
+        
+        order = cursor.fetchone()
+        
+        cursor.close()
+        conn.close()
+        
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        return {
+            "status": "success",
+            "order": order
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in get_order_by_number: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     port = int(os.getenv('PORT', 8000))
+    logger.info(f"Starting API server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
