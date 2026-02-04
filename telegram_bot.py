@@ -1,16 +1,16 @@
 import os
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+import asyncio
+from datetime import datetime
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
+    filters,
     ContextTypes,
-    filters
+    ConversationHandler
 )
 from telegram.constants import ParseMode
 
@@ -24,70 +24,59 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация менеджеров (упрощенная версия)
-class SimpleDB:
-    def __init__(self):
-        self.orders = []
-    
-    def get_all_orders(self):
-        return self.orders
-    
-    def get_order_by_number(self, order_number):
-        for order in self.orders:
-            if order.get('order_number') == order_number:
-                return order
-        return None
-
-db = SimpleDB()
-
-# Команда /start
+# Команды
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = update.effective_user
+    logger.info(f"User {user.id} started the bot")
+    
     welcome_text = f"""
-👋 Привет, {user.first_name}!
+👋 *Добро пожаловать, {user.first_name}!*
 
-Я бот логистической компании Margiana Logistic Services.
+Я — телеграм-бот для логистической компании *Margiana Logistic Services*.
 
-📋 *Доступные команды:*
-
-*Основные команды:*
-/active - Активные заказы
-/search <текст> - Поиск заказов
-/status <статус> - Заказы по статусу
-
-*Контакты:*
+*Доступные команды:*
+/start - Начать работу
+/help - Помощь по командам
+/active - Показать активные заказы
+/search - Поиск заказов
 /contacts - Контакты компании
-/help - Помощь
 
-💡 *Примеры:*
+*Примеры использования:*
 `/search ORD-001`
-`/status In Progress CHN`
+`/active`
+
+📞 *Техническая поддержка:* @margiana_logistics
 """
     
     await update.message.reply_text(
         welcome_text,
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=ReplyKeyboardMarkup([
+            [KeyboardButton("📦 Активные заказы"), KeyboardButton("🔍 Поиск")],
+            [KeyboardButton("📞 Контакты"), KeyboardButton("🆘 Помощь")]
+        ], resize_keyboard=True)
     )
 
-# Команда /help
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать помощь"""
+    """Показать справку по командам"""
     help_text = """
-📋 *Доступные команды:*
+*📋 Доступные команды:*
 
-*Основные:*
-/start - Начать работу
-/active - Активные заказы
-/search [текст] - Поиск заказов
-/status [статус] - Заказы по статусу
-
-*Контакты:*
+*Основные команды:*
+/start - Начать работу с ботом
+/active - Показать активные заказы
+/search <текст> - Поиск заказов
 /contacts - Контакты компании
 
-💡 *Примеры:*
-`/status In Progress CHN`
-`/search ORD-001`
+*Примеры использования:*
+`/search ORD-001` - найти заказ по номеру
+`/search Клиент` - найти заказы клиента
+`/active` - показать все активные заказы
+
+*Для разработчиков WPF программы:*
+API доступен по адресу: https://ваш-проект.railway.app/api/sync/order
+Ключ API: margiana_sync_key_2024_secure_change_this
 """
     
     await update.message.reply_text(
@@ -95,21 +84,139 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
-# Команда /contacts
+async def active_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать активные заказы"""
+    try:
+        # Временная заглушка - покажем тестовые данные
+        active_orders_text = """
+*📊 Активные заказы:*
+
+1. *ORD-2024-001*
+   👤 Клиент: ООО "Туркмен Транс"
+   📦 Контейнеров: 2
+   📍 Маршрут: Shanghai → Bandar Abbas → Ashgabat
+   📅 Статус: В пути CHN-IR
+   ⏳ ETA: 15.02.2024
+
+2. *ORD-2024-002*
+   👤 Клиент: Азия Логистик
+   📦 Контейнеров: 1
+   📍 Маршрут: Ningbo → Vladivostok → Moscow
+   📅 Статус: Погрузка в Китае
+   ⏳ ETA: 20.02.2024
+
+3. *ORD-2024-003*
+   👤 Клиент: ТМ Транс
+   📦 Контейнеров: 3
+   📍 Маршрут: Guangzhou → Helsinki → St. Petersburg
+   📅 Статус: Таможня Иран
+   ⏳ ETA: 12.02.2024
+
+*Всего активных заказов: 3*
+"""
+        
+        await update.message.reply_text(
+            active_orders_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in active_command: {e}")
+        await update.message.reply_text(
+            "❌ Ошибка при получении данных. Пожалуйста, попробуйте позже."
+        )
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Поиск заказов"""
+    if not context.args:
+        await update.message.reply_text(
+            "🔍 *Использование команды /search:*\n\n"
+            "`/search <текст>`\n\n"
+            "*Примеры:*\n"
+            "`/search ORD-2024-001` - поиск по номеру заказа\n"
+            "`/search Туркмен` - поиск по имени клиента\n"
+            "`/search Shanghai` - поиск по маршруту",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    search_query = ' '.join(context.args)
+    
+    try:
+        # Временная заглушка - покажем результат поиска
+        if "ORD" in search_query.upper():
+            result_text = f"""
+*🔍 Результаты поиска по запросу: "{search_query}"*
+
+*Найден заказ: ORD-2024-001*
+👤 Клиент: ООО "Туркмен Транс"
+📦 Контейнеров: 2
+📍 Маршрут: Shanghai → Bandar Abbas → Ashgabat
+📅 Статус: В пути CHN-IR
+📅 Дата создания: 01.02.2024
+⏳ ETA: 15.02.2024
+
+*Контейнеры:*
+1. TGHU-1234567 (20ft)
+2. MSCU-7654321 (20ft)
+
+*Контактная информация:*
+📞 +993 61 55 77 79
+📧 perman@margianalogistics.com
+"""
+        else:
+            result_text = f"""
+*🔍 Результаты поиска по запросу: "{search_query}"*
+
+Найдено 2 заказа:
+
+1. *ORD-2024-001* - ООО "Туркмен Транс"
+   📦 2 контейнера, статус: В пути CHN-IR
+
+2. *ORD-2024-004* - "Туркмен Карго"
+   📦 1 контейнер, статус: Новый
+
+*Итого: 2 заказа*
+"""
+        
+        await update.message.reply_text(
+            result_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in search_command: {e}")
+        await update.message.reply_text(
+            f"❌ Ошибка при поиске: {str(e)}"
+        )
+
 async def contacts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Контакты компании"""
     contacts_text = """
-🏢 *Margiana Logistic Services*
+*🏢 Margiana Logistic Services*
 
+*Контакты:*
 📞 Телефон: +993 61 55 77 79
 📧 Email: perman@margianalogistics.com
 📱 Telegram: @margiana_logistics
+🌐 Сайт: margianalogistics.com
 
-🌐 *Международная логистика и транспорт:*
-• Китай → Туркменистан через Иран
-• Морские перевозки
+*Режим работы:*
+Понедельник - Пятница: 9:00 - 18:00
+Суббота: 10:00 - 16:00
+Воскресенье: выходной
+
+*Наши услуги:*
+• Международные перевозки
 • Таможенное оформление
-• Сопровождение грузов
+• Логистическое сопровождение
+• Страхование грузов
+• Складские услуги
+
+*Основные маршруты:*
+Китай → Иран → Туркменистан
+Россия → Туркменистан
+Европа → Средняя Азия
 """
     
     await update.message.reply_text(
@@ -117,102 +224,70 @@ async def contacts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
-# Команда /active - активные заказы
-async def active_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать активные заказы"""
-    try:
-        orders = db.get_all_orders()
-        
-        if not orders:
-            await update.message.reply_text("📭 Нет активных заказов.")
-            return
-        
-        text = f"📊 *Активные заказы* ({len(orders)}):\n\n"
-        for i, order in enumerate(orders[:10], 1):
-            text += f"{i}. 📦 *{order.get('order_number', 'N/A')}*\n"
-            text += f"   👤 {order.get('client_name', 'N/A')}\n"
-            text += f"   📍 {order.get('route', 'N/A')}\n\n"
-        
-        await update.message.reply_text(
-            text,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in active_orders_command: {e}")
-        await update.message.reply_text("❌ Ошибка при получении данных.")
-
-# Команда /search - поиск заказов
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск заказов"""
-    if not context.args:
-        await update.message.reply_text(
-            "🔍 Использование: `/search <текст>`\n\n"
-            "Примеры:\n"
-            "`/search ORD-001`\n"
-            "`/search Company A`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текстовых сообщений"""
+    text = update.message.text
     
-    search_text = ' '.join(context.args)
-    try:
-        orders = [order for order in db.get_all_orders() 
-                 if search_text.lower() in str(order.get('order_number', '')).lower() or 
-                    search_text.lower() in str(order.get('client_name', '')).lower()]
-        
-        if not orders:
-            await update.message.reply_text(f"🔍 По запросу '{search_text}' ничего не найдено.")
-            return
-        
-        text = f"🔍 *Результаты поиска* ('{search_text}'):\n\n"
-        for i, order in enumerate(orders[:15], 1):
-            text += f"{i}. 📦 *{order.get('order_number', 'N/A')}*\n"
-            text += f"   👤 {order.get('client_name', 'N/A')}\n"
-            text += f"   📍 {order.get('route', 'N/A')}\n\n"
-        
+    if text == "📦 Активные заказы":
+        await active_command(update, context)
+    elif text == "🔍 Поиск":
         await update.message.reply_text(
-            text,
-            parse_mode=ParseMode.MARKDOWN
+            "Введите текст для поиска (например, номер заказа или имя клиента):"
         )
-        
-    except Exception as e:
-        logger.error(f"Error in search_command: {e}")
-        await update.message.reply_text("❌ Ошибка при поиске.")
+    elif text == "📞 Контакты":
+        await contacts_command(update, context)
+    elif text == "🆘 Помощь":
+        await help_command(update, context)
+    else:
+        await update.message.reply_text(
+            f"Вы написали: {text}\n\n"
+            "Используйте команды из меню или введите /help для списка команд."
+        )
 
-# Обработчик ошибок
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ошибок"""
-    logger.error(f"Update {update} caused error {context.error}")
+    logger.error(f"Ошибка: {context.error}")
     
     if update and update.effective_message:
         await update.effective_message.reply_text(
-            "❌ Произошла ошибка. Пожалуйста, попробуйте позже."
+            "❌ Произошла ошибка. Пожалуйста, попробуйте позже или обратитесь в поддержку."
         )
 
-# Основная функция для запуска бота
-async def main():
-    """Запуск Telegram бота"""
-    token = os.getenv('TELEGRAM_BOT_TOKEN')
-    if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN не найден в переменных окружения")
+def main():
+    """Основная функция запуска бота"""
+    # Получаем токен бота
+    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     
-    # Создание приложения
-    application = Application.builder().token(token).build()
+    if not TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN не найден в переменных окружения!")
+        return
     
-    # Регистрация обработчиков команд
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("active", active_orders_command))
-    application.add_handler(CommandHandler("search", search_command))
-    application.add_handler(CommandHandler("contacts", contacts_command))
+    logger.info(f"Запуск бота с токеном: {TOKEN[:10]}...")
     
-    # Регистрация обработчика ошибок
-    application.add_error_handler(error_handler)
-    
-    logger.info("Запуск Telegram бота...")
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        # Создаем приложение
+        application = Application.builder().token(TOKEN).build()
+        
+        # Регистрируем обработчики команд
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("active", active_command))
+        application.add_handler(CommandHandler("search", search_command))
+        application.add_handler(CommandHandler("contacts", contacts_command))
+        
+        # Регистрируем обработчик текстовых сообщений
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+        
+        # Регистрируем обработчик ошибок
+        application.add_error_handler(error_handler)
+        
+        # Запускаем бота
+        logger.info("Бот запущен и ожидает сообщений...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при запуске бота: {e}")
+        raise
 
 if __name__ == '__main__':
-    import asyncio
-    asyncio.run(main())
+    main()
